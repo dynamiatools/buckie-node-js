@@ -1,4 +1,8 @@
-[![Release npm](https://github.com/dynamiatools/buckie-node-js/actions/workflows/release-npm.yml/badge.svg)](https://github.com/dynamiatools/buckie-node-js/actions/workflows/release-npm.yml)
+![npm](https://img.shields.io/npm/v/@dynamia-tools/buckie)
+![npm downloads](https://img.shields.io/npm/dm/@dynamia-tools/buckie)
+![license](https://img.shields.io/npm/l/@dynamia-tools/buckie)
+![node](https://img.shields.io/node/v/@dynamia-tools/buckie)
+[![release](https://github.com/dynamiatools/buckie-node-js/actions/workflows/release-npm.yml/badge.svg)](https://github.com/dynamiatools/buckie-node-js/actions/workflows/release-npm.yml)
 
 # Buckie Node.js
 
