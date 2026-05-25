@@ -20,22 +20,18 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
 
       - name: Set version from release tag
-        working-directory: buckie-node-js
         run: |
           VERSION=${GITHUB_REF_NAME#v}
           echo "Publishing version $VERSION"
           npm version "$VERSION" --no-git-tag-version
 
       - name: Install dependencies
-        working-directory: buckie-node-js
         run: npm ci
 
       - name: Build
-        working-directory: buckie-node-js
         run: npm run build
 
       - name: Publish to npm
-        working-directory: buckie-node-js
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
