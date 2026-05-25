@@ -1,3 +1,5 @@
+[![Release npm](https://github.com/dynamiatools/buckie-node-js/actions/workflows/release-npm.yml/badge.svg)](https://github.com/dynamiatools/buckie-node-js/actions/workflows/release-npm.yml)
+
 # Buckie Node.js
 
 Node.js 24 implementation of Buckie — a filesystem-native file server with a minimal S3-style REST API optimized for secure server-to-server file operations.
