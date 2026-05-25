@@ -41,6 +41,9 @@ build/Release
 node_modules/
 jspm_packages/
 
+# Buckie runtime data directory
+.buckie/
+
 # Snowpack dependency directory (https://snowpack.dev/)
 web_modules/
 
