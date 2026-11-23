@@ -5,9 +5,12 @@ import type { ThumbnailService } from '../../thumbnail/thumbnail.service.js'
 import type { IdentityService } from '../../auth/identity.service.js'
 import type { OperationalLogger } from '../../logging/logger.js'
 import { BuckieError, BuckieErrorCode, forbidden, successResponse } from '../../errors/index.js'
+import { getMaxUploadBytes } from '../../config/config.service.js'
+import { guardUpload } from '../../storage/upload-guard.js'
+import { normalizeFit, normalizeFormat, parseSize } from '../../thumbnail/thumbnail.service.js'
 import type { Permission, ListFilter } from '../../types/index.js'
 
-function parseFilter(raw: string | undefined): ListFilter {
+function parseFilter(raw: unknown): ListFilter {
   if (raw === 'files' || raw === 'dirs') return raw
   return 'all'
 }
@@ -33,7 +36,6 @@ export async function objectRoutes(fastify: FastifyInstance, options: ObjectRout
     key: string,
     permission: Permission,
   ) {
-    const bucket = await bucketService.get(bucketName)
     const identity = request.authIdentity
 
     const grant = identityService.checkPermission(identity, bucketName, key, permission)
@@ -47,7 +49,25 @@ export async function objectRoutes(fastify: FastifyInstance, options: ObjectRout
       throw forbidden(`Permission '${permission}' denied on bucket '${bucketName}' for path '${key}'`)
     }
 
-    return bucket
+    // Permission comes first, so identities without a grant cannot tell which buckets exist
+    return bucketService.get(bucketName)
+  }
+
+  /** Headers for downloads; active content is forced to download and never sniffed. */
+  function setDownloadHeaders(
+    reply: FastifyReply,
+    info: { mimeType: string; size: number; etag: string; lastModified: Date },
+  ): void {
+    reply.header('Content-Type', info.mimeType)
+    reply.header('Content-Length', info.size.toString())
+    reply.header('ETag', info.etag)
+    reply.header('Last-Modified', info.lastModified.toUTCString())
+    reply.header('Cache-Control', 'private, max-age=0')
+    reply.header('X-Content-Type-Options', 'nosniff')
+    reply.header('Content-Security-Policy', "default-src 'none'; sandbox")
+    if (storageService.isActiveContent(info.mimeType)) {
+      reply.header('Content-Disposition', 'attachment')
+    }
   }
 
   /**
@@ -58,8 +78,9 @@ export async function objectRoutes(fastify: FastifyInstance, options: ObjectRout
     Querystring: { limit?: string; cursor?: string; filter?: string }
   }>('/:bucket', async (request, reply) => {
     const { bucket: bucketName } = request.params
-    const limit = Math.min(parseInt(request.query.limit ?? '100', 10), 1000)
-    const cursor = request.query.cursor
+    const parsedLimit = parseInt(typeof request.query.limit === 'string' ? request.query.limit : '100', 10)
+    const limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? Math.min(parsedLimit, 1000) : 100
+    const cursor = typeof request.query.cursor === 'string' ? request.query.cursor : undefined
     const filter = parseFilter(request.query.filter)
 
     const bucket = await resolveBucketAndCheck(request, reply, bucketName, '/', 'read')
@@ -108,21 +129,23 @@ export async function objectRoutes(fastify: FastifyInstance, options: ObjectRout
       return reply.send(successResponse(result))
     }
 
-    // Check for thumbnail request
-    const { w, h, fit, format } = request.query
-    if (w || h) {
-      const thumbOptions = {
-        width: w ? parseInt(w, 10) : undefined,
-        height: h ? parseInt(h, 10) : undefined,
-        fit: (fit as 'cover' | 'contain' | 'fill' | 'inside' | 'outside') ?? 'cover',
-        format: (format as 'jpeg' | 'png' | 'webp') ?? 'webp',
-      }
-
-      const thumb = await thumbnailService.getThumbnail(bucket, key, thumbOptions)
+    // Thumbnail request. Compatible with 1.0.0: non-numeric or negative sizes are ignored, unknown
+    // fits fall back to 'cover' and oversized values are clamped. Only the output format is strict.
+    const width = parseSize(request.query.w)
+    const height = parseSize(request.query.h)
+    if (width || height) {
+      const rawFormat = request.query.format
+      const thumb = await thumbnailService.getThumbnail(bucket, key, {
+        width,
+        height,
+        fit: normalizeFit(typeof request.query.fit === 'string' ? request.query.fit : undefined),
+        format: normalizeFormat(typeof rawFormat === 'string' ? rawFormat : 'webp'),
+      })
       if (thumb) {
         reply.header('Content-Type', thumb.mimeType)
         reply.header('Content-Length', thumb.size.toString())
-        reply.header('Cache-Control', 'public, max-age=86400')
+        reply.header('Cache-Control', 'private, max-age=86400')
+        reply.header('X-Content-Type-Options', 'nosniff')
         logger.log({
           event: 'download',
           identity: request.authIdentity.identity,
@@ -139,11 +162,7 @@ export async function objectRoutes(fastify: FastifyInstance, options: ObjectRout
     // Regular file download
     const download = await storageService.download(bucket, key)
 
-    reply.header('Content-Type', download.mimeType)
-    reply.header('Content-Length', download.size.toString())
-    reply.header('ETag', download.etag)
-    reply.header('Last-Modified', download.lastModified.toUTCString())
-    reply.header('Cache-Control', 'private, max-age=0')
+    setDownloadHeaders(reply, download)
 
     logger.log({
       event: 'download',
@@ -176,11 +195,7 @@ export async function objectRoutes(fastify: FastifyInstance, options: ObjectRout
 
     const info = await storageService.stat(bucket, key)
 
-    reply.header('Content-Type', info.mimeType)
-    reply.header('Content-Length', info.size.toString())
-    reply.header('ETag', info.etag)
-    reply.header('Last-Modified', info.lastModified.toUTCString())
-    reply.header('Cache-Control', 'private, max-age=0')
+    setDownloadHeaders(reply, info)
 
     logger.log({
       event: 'head',
@@ -223,7 +238,12 @@ export async function objectRoutes(fastify: FastifyInstance, options: ObjectRout
     })
 
     try {
-      const result = await storageService.upload(bucket, key, request.raw as any)
+      const declared = request.headers['content-length']
+      const body = guardUpload(request.raw, {
+        maxBytes: getMaxUploadBytes(),
+        contentLength: typeof declared === 'string' && /^\d+$/.test(declared) ? Number(declared) : null,
+      })
+      const result = await storageService.upload(bucket, key, body)
 
       logger.log({
         event: 'upload_committed',

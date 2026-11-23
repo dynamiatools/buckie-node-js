@@ -60,7 +60,7 @@ buckie create bucket remote-docs /uploads \
   --sftp-private-key "$(cat ~/.ssh/id_rsa)"
 
 # Create an identity
-buckie create identity erp-prod my-secret-password
+BUCKIE_IDENTITY_SECRET=my-secret-password buckie create identity erp-prod
 
 # Grant permissions
 buckie grant erp-prod documents --read --write --delete --prefix /tenant-a/
@@ -100,7 +100,7 @@ buckie list buckets
 buckie remove bucket <name>
 
 # Identities
-buckie create identity <identity> <secret>
+buckie create identity <identity>   # secret from BUCKIE_IDENTITY_SECRET or STDIN
 buckie list identities
 buckie remove identity <identity>
 
@@ -325,7 +325,11 @@ await server.listen({ host: config.host, port: config.port })
 | Variable | Default | Description |
 |---|---|---|
 | `BUCKIE_DATA_DIR` | `<cwd>/.buckie` | Where Buckie stores `config.json`, logs and cache |
-| `BUCKIE_HOST` | `0.0.0.0` | Bind host |
+| `BUCKIE_HOST` | `127.0.0.1` | Bind host (`buckie serve` and embedded default) |
+| `BUCKIE_MAX_UPLOAD_BYTES` | `0` (unlimited) | Reject larger uploads with `413` |
+| `BUCKIE_FOLLOW_SYMLINKS` | unset | `1` follows symlinks that leave a bucket |
+| `BUCKIE_TRUST_PROXY` | unset | `1` trusts `X-Forwarded-For` for the client IP |
+| `BUCKIE_IDENTITY_SECRET` | unset | Secret for `buckie create identity` (alternative to STDIN) |
 | `BUCKIE_PORT` | `8080` | Bind port |
 | `BUCKIE_LOG_LEVEL` | `info` | Pino log level (`trace` `debug` `info` `warn` `error`) |
 
@@ -382,6 +386,24 @@ await server.listen({ host: config.host, port: config.port })
  └── .buckie/
       └── staging/              # Upload staging area (atomic commits)
 ```
+
+---
+
+## Upgrading from 1.0.0
+
+Your existing `config.json` is read as is; nothing needs to be migrated, and its file mode is preserved when Buckie rewrites it.
+
+| Area | Behavior now | What to check |
+|---|---|---|
+| Grant prefixes | A prefix without a trailing slash matches whole path segments: `/tenant-a` covers `/tenant-a/...` but **no longer** `/tenant-ab/...`. Prefixes ending in `/` are unchanged. | Look for grants relying on partial-name matches. |
+| Symlinks in buckets | Symlinks that point **outside** the bucket are not followed. | Run `find <bucket path> -type l`; set `BUCKIE_FOLLOW_SYMLINKS=1` if you link disks on purpose. |
+| Thumbnails | `format` must be `webp`, `jpeg`/`jpg` or `png` (otherwise `400`); `w`/`h` above 4096 are clamped. Thumbnails are cached in `<data dir>/cache/thumbnails/`. | Old `WxH/` folders inside buckets are no longer used; remove them when convenient. |
+| Downloads | HTML, SVG and script files are sent as `attachment`; all responses carry `nosniff` and a sandbox CSP. | Pages that navigate directly to an HTML file served by Buckie will download it. |
+| Unknown bucket | A GET on a bucket the identity has no grant for is `403` (it was `404`). | Clients that treat `404` specially. |
+| `buckie serve` | Binds to `127.0.0.1` (was `0.0.0.0`). | Pass `--host 0.0.0.0` or set `BUCKIE_HOST` if you relied on it. |
+| Client IP in logs | The socket address, unless `BUCKIE_TRUST_PROXY=1`. | Set it behind your own reverse proxy. |
+| Corrupt `config.json` | Invalid JSON raises an error instead of being treated as empty. | Fix or restore the file. |
+| `create identity` | The secret may come from `BUCKIE_IDENTITY_SECRET` or STDIN; passing it as an argument still works but warns. | Update scripts and docs. |
 
 ---
 

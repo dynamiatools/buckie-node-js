@@ -1,17 +1,12 @@
 import * as bcrypt from 'bcrypt'
-import { readConfig, writeConfig } from '../config/config.service.js'
+import { readConfig, updateConfig } from '../config/config.service.js'
 import type { Identity, Grant, Permission } from '../types/index.js'
-import { BuckieError, BuckieErrorCode, notFound, conflict } from '../errors/index.js'
+import { BuckieError, BuckieErrorCode, notFound, conflict, badRequest } from '../errors/index.js'
 
 export class IdentityService {
   constructor(private readonly dataDir: string) {}
 
   async create(identity: string, secret: string): Promise<Identity> {
-    const existing = await this.find(identity)
-    if (existing) {
-      throw conflict(`Identity '${identity}' already exists`, BuckieErrorCode.IDENTITY_ALREADY_EXISTS)
-    }
-
     const hashedSecret = await bcrypt.hash(secret, 12)
 
     const now = new Date().toISOString()
@@ -23,9 +18,12 @@ export class IdentityService {
       updatedAt: now,
     }
 
-    const cfg = await readConfig(this.dataDir)
-    cfg.identities.push(id)
-    await writeConfig(this.dataDir, cfg)
+    await updateConfig(this.dataDir, cfg => {
+      if (cfg.identities.some(i => i.identity === identity)) {
+        throw conflict(`Identity '${identity}' already exists`, BuckieErrorCode.IDENTITY_ALREADY_EXISTS)
+      }
+      cfg.identities.push(id)
+    })
     return id
   }
 
@@ -49,48 +47,55 @@ export class IdentityService {
 
   async verify(identity: string, secret: string): Promise<Identity | null> {
     const id = await this.find(identity)
-    if (!id) return null
+    // Always run bcrypt, even for unknown identities, so response time
+    // does not reveal which identities exist.
+    const hash = id?.hashedSecret ?? await dummyHash()
+    let valid = false
     try {
-      const valid = await bcrypt.compare(secret, id.hashedSecret)
-      return valid ? id : null
+      valid = await bcrypt.compare(secret, hash)
     } catch {
-      return null
+      valid = false
     }
+    return id && valid ? id : null
   }
 
   async grant(identity: string, grant: Grant): Promise<Identity> {
-    const cfg = await readConfig(this.dataDir)
-    const idx = cfg.identities.findIndex(i => i.identity === identity)
-    if (idx < 0) throw notFound(`Identity '${identity}'`, BuckieErrorCode.IDENTITY_NOT_FOUND)
+    for (const prefix of grant.prefixes ?? []) {
+      if (typeof prefix !== 'string' || prefix.includes('\0') || prefix.split('/').includes('..')) {
+        throw badRequest(`Invalid grant prefix: ${prefix}`, BuckieErrorCode.PREFIX_INVALID)
+      }
+    }
 
-    const id = cfg.identities[idx]!
-    id.grants = id.grants.filter(g => g.bucket !== grant.bucket)
-    id.grants.push(grant)
-    id.updatedAt = new Date().toISOString()
-    await writeConfig(this.dataDir, cfg)
-    return id
+    return updateConfig(this.dataDir, cfg => {
+      const id = cfg.identities.find(i => i.identity === identity)
+      if (!id) throw notFound(`Identity '${identity}'`, BuckieErrorCode.IDENTITY_NOT_FOUND)
+
+      id.grants = id.grants.filter(g => g.bucket !== grant.bucket)
+      id.grants.push(grant)
+      id.updatedAt = new Date().toISOString()
+      return id
+    })
   }
 
   async revoke(identity: string, bucket: string): Promise<Identity> {
-    const cfg = await readConfig(this.dataDir)
-    const idx = cfg.identities.findIndex(i => i.identity === identity)
-    if (idx < 0) throw notFound(`Identity '${identity}'`, BuckieErrorCode.IDENTITY_NOT_FOUND)
+    return updateConfig(this.dataDir, cfg => {
+      const id = cfg.identities.find(i => i.identity === identity)
+      if (!id) throw notFound(`Identity '${identity}'`, BuckieErrorCode.IDENTITY_NOT_FOUND)
 
-    const id = cfg.identities[idx]!
-    id.grants = id.grants.filter(g => g.bucket !== bucket)
-    id.updatedAt = new Date().toISOString()
-    await writeConfig(this.dataDir, cfg)
-    return id
+      id.grants = id.grants.filter(g => g.bucket !== bucket)
+      id.updatedAt = new Date().toISOString()
+      return id
+    })
   }
 
   async delete(identity: string): Promise<void> {
-    const cfg = await readConfig(this.dataDir)
-    const before = cfg.identities.length
-    cfg.identities = cfg.identities.filter(i => i.identity !== identity)
-    if (cfg.identities.length === before) {
-      throw notFound(`Identity '${identity}'`, BuckieErrorCode.IDENTITY_NOT_FOUND)
-    }
-    await writeConfig(this.dataDir, cfg)
+    await updateConfig(this.dataDir, cfg => {
+      const before = cfg.identities.length
+      cfg.identities = cfg.identities.filter(i => i.identity !== identity)
+      if (cfg.identities.length === before) {
+        throw notFound(`Identity '${identity}'`, BuckieErrorCode.IDENTITY_NOT_FOUND)
+      }
+    })
   }
 
   checkPermission(id: Identity, bucket: string, key: string, permission: Permission): Grant | null {
@@ -103,11 +108,25 @@ export class IdentityService {
       const normalizedKey = key.startsWith('/') ? key : `/${key}`
       for (const prefix of grant.prefixes) {
         const normalizedPrefix = prefix.startsWith('/') ? prefix : `/${prefix}`
-        if (normalizedKey.startsWith(normalizedPrefix) || normalizedPrefix === '/') {
-          return grant
-        }
+        if (matchesPrefix(normalizedKey, normalizedPrefix)) return grant
       }
     }
     return null
   }
+}
+
+/**
+ * Prefix match that respects path-segment boundaries: '/tenant-a' matches
+ * '/tenant-a' and '/tenant-a/x' but never '/tenant-ab/x'.
+ * A prefix ending in '/' is already a segment boundary.
+ */
+function matchesPrefix(key: string, prefix: string): boolean {
+  if (prefix === '/') return true
+  if (prefix.endsWith('/')) return key.startsWith(prefix)
+  return key === prefix || key.startsWith(`${prefix}/`)
+}
+
+let dummyHashPromise: Promise<string> | undefined
+function dummyHash(): Promise<string> {
+  return (dummyHashPromise ??= bcrypt.hash('buckie-dummy-secret', 12))
 }

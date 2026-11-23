@@ -9,6 +9,7 @@ import type { IdentityService } from '../auth/identity.service.js'
 import type { OperationalLogger } from '../logging/logger.js'
 import { BuckieError } from '../errors/index.js'
 import type { BuckieConfig } from '../types/index.js'
+import { trustProxy } from '../config/config.service.js'
 
 interface ServerOptions {
   config: BuckieConfig
@@ -30,6 +31,10 @@ export async function createServer(options: ServerOptions): Promise<FastifyInsta
         : undefined,
     },
     disableRequestLogging: false,
+    // X-Forwarded-For is client-controlled; only honor it behind a proxy you operate (BUCKIE_TRUST_PROXY=1).
+    trustProxy: trustProxy(),
+    // objects.route.ts declares its own HEAD handler; the automatic one would be a duplicate route
+    exposeHeadRoutes: false,
   })
 
   // Register sensible for default error handling

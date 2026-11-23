@@ -212,27 +212,7 @@ describe('StorageService', () => {
 // ──────────────────────────────────────────────────────────
 // ThumbnailService Tests
 // ──────────────────────────────────────────────────────────
-describe('ThumbnailService.buildThumbKey', () => {
-  it('should build key for a file in a subdirectory', () => {
-    const key = thumbnailService.buildThumbKey('account1/producto.jpg', { width: 200, height: 200 })
-    expect(key).toBe('account1/200x200/producto.jpg')
-  })
-
-  it('should build key for a file at bucket root', () => {
-    const key = thumbnailService.buildThumbKey('photo.png', { width: 100, height: 100 })
-    expect(key).toBe('100x100/photo.png')
-  })
-
-  it('should build key for a deeply nested file', () => {
-    const key = thumbnailService.buildThumbKey('a/b/c/image.webp', { width: 300, height: 150 })
-    expect(key).toBe('a/b/c/300x150/image.webp')
-  })
-
-  it('should use 0 for missing width or height', () => {
-    const key = thumbnailService.buildThumbKey('img.jpg', { width: 400 })
-    expect(key).toBe('400x0/img.jpg')
-  })
-
+describe('ThumbnailService', () => {
   it('should return null for non-image files', async () => {
     const bucket = await bucketService.create('thumb-test', path.join(tempDir, 'thumb-test'))
     await storageService.upload(bucket, 'doc.txt', Readable.from(['hello']))

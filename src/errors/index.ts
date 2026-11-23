@@ -26,6 +26,12 @@ export enum BuckieErrorCode {
   // Uploads
   UPLOAD_FAILED = 'BUCKIE_UPLOAD_FAILED',
   UPLOAD_STAGING_FAILED = 'BUCKIE_UPLOAD_STAGING_FAILED',
+  UPLOAD_INCOMPLETE = 'BUCKIE_UPLOAD_INCOMPLETE',
+  PAYLOAD_TOO_LARGE = 'BUCKIE_PAYLOAD_TOO_LARGE',
+
+  // Thumbnails and grants
+  THUMBNAIL_PARAM_INVALID = 'BUCKIE_THUMBNAIL_PARAM_INVALID',
+  PREFIX_INVALID = 'BUCKIE_PREFIX_INVALID',
 
   // SFTP
   SFTP_CONNECTION_FAILED = 'BUCKIE_SFTP_CONNECTION_FAILED',
@@ -86,6 +92,10 @@ export function badRequest(message: string, code: BuckieErrorCode = BuckieErrorC
 
 export function conflict(message: string, code: BuckieErrorCode): BuckieError {
   return new BuckieError(code, message, 409)
+}
+
+export function payloadTooLarge(limit: number): BuckieError {
+  return new BuckieError(BuckieErrorCode.PAYLOAD_TOO_LARGE, `Upload exceeds the maximum size of ${limit} bytes`, 413)
 }
 
 export function internalError(message: string, details?: Record<string, unknown>): BuckieError {
