@@ -1,6 +1,6 @@
 {
   "name": "@dynamia-tools/buckie",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Standalone filesystem-native file server with a minimal S3-style API for secure server-to-server file operations",
   "keywords": [
     "dynamia",

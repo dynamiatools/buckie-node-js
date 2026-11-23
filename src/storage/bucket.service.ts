@@ -1,7 +1,7 @@
 import path from 'node:path'
 import fsp from 'node:fs/promises'
 import fs from 'node:fs'
-import { readConfig, writeConfig } from '../config/config.service.js'
+import { readConfig, updateConfig, followExternalSymlinks } from '../config/config.service.js'
 import type { Bucket, StorageTarget, SftpConfig } from '../types/index.js'
 import { BuckieError, BuckieErrorCode, notFound, conflict } from '../errors/index.js'
 
@@ -29,10 +29,8 @@ export class BucketService {
       throw new BuckieError(BuckieErrorCode.BUCKET_PATH_INVALID, `Bucket path must be absolute: ${bucketPath}`, 400)
     }
 
-    const existing = await this.find(name)
-    if (existing) {
-      throw conflict(`Bucket '${name}' already exists`, BuckieErrorCode.BUCKET_ALREADY_EXISTS)
-    }
+    const alreadyExists = () => conflict(`Bucket '${name}' already exists`, BuckieErrorCode.BUCKET_ALREADY_EXISTS)
+    if (await this.find(name)) throw alreadyExists()
 
     if (storage === 'sftp') {
       if (!sftp) {
@@ -47,9 +45,10 @@ export class BucketService {
         sftp,
       }
 
-      const cfg = await readConfig(this.dataDir)
-      cfg.buckets.push(bucket)
-      await writeConfig(this.dataDir, cfg)
+      await updateConfig(this.dataDir, cfg => {
+        if (cfg.buckets.some(b => b.name === name)) throw alreadyExists()
+        cfg.buckets.push(bucket)
+      })
       return bucket
     }
 
@@ -74,9 +73,10 @@ export class BucketService {
       createdAt: new Date().toISOString(),
     }
 
-    const cfg = await readConfig(this.dataDir)
-    cfg.buckets.push(bucket)
-    await writeConfig(this.dataDir, cfg)
+    await updateConfig(this.dataDir, cfg => {
+      if (cfg.buckets.some(b => b.name === name)) throw alreadyExists()
+      cfg.buckets.push(bucket)
+    })
     return bucket
   }
 
@@ -99,27 +99,33 @@ export class BucketService {
   }
 
   async delete(name: string): Promise<void> {
-    const cfg = await readConfig(this.dataDir)
-    const before = cfg.buckets.length
-    cfg.buckets = cfg.buckets.filter(b => b.name !== name)
-    if (cfg.buckets.length === before) {
-      throw notFound(`Bucket '${name}'`, BuckieErrorCode.BUCKET_NOT_FOUND)
-    }
-    await writeConfig(this.dataDir, cfg)
+    await updateConfig(this.dataDir, cfg => {
+      const before = cfg.buckets.length
+      cfg.buckets = cfg.buckets.filter(b => b.name !== name)
+      if (cfg.buckets.length === before) {
+        throw notFound(`Bucket '${name}'`, BuckieErrorCode.BUCKET_NOT_FOUND)
+      }
+    })
   }
 
   /**
    * Resolve a key to an absolute filesystem path within the bucket.
-   * Only valid for `'local'` storage target buckets.
-   * Validates against path traversal attacks.
+   * Only valid for `'local'` storage target buckets. This is the only way to turn a key
+   * into a path: it blocks traversal, NUL bytes, the reserved `.buckie` directory
+   * (case-insensitive) and symlinks that leave the bucket (opt-in `BUCKIE_FOLLOW_SYMLINKS=1`).
    */
   resolveKey(bucket: Bucket, key: string): string {
+    if (key.includes('\0')) {
+      throw new BuckieError(BuckieErrorCode.PATH_INVALID, 'Invalid key', 400)
+    }
+
     // Normalize to remove double slashes, . and ..
     const normalized = path.normalize(key).replace(/\\/g, '/')
 
-    // Block access to internal .buckie directory
+    // Block access to the internal directory; case-insensitive so that
+    // case-insensitive filesystems cannot be used to bypass the check.
     const parts = normalized.split('/')
-    if (parts.some(p => p === BUCKIE_INTERNAL_DIR)) {
+    if (parts.some(p => p.toLowerCase() === BUCKIE_INTERNAL_DIR)) {
       throw new BuckieError(BuckieErrorCode.PATH_RESERVED, `Access to internal '${BUCKIE_INTERNAL_DIR}' path is forbidden`, 403)
     }
 
@@ -130,6 +136,29 @@ export class BucketService {
     // Ensure resolved path is within bucket root
     if (!resolved.startsWith(bucketRoot + path.sep) && resolved !== bucketRoot) {
       throw new BuckieError(BuckieErrorCode.PATH_TRAVERSAL, 'Path traversal detected', 400)
+    }
+
+    // Symlink guard: the deepest existing ancestor must still live inside the bucket
+    if (resolved !== bucketRoot && !followExternalSymlinks()) {
+      let realRoot: string
+      try {
+        realRoot = fs.realpathSync(bucketRoot)
+      } catch {
+        return resolved // bucket directory missing: nothing to escape through
+      }
+
+      let probe = resolved
+      while (probe !== bucketRoot && !pathExists(probe)) probe = path.dirname(probe)
+
+      let realProbe: string
+      try {
+        realProbe = fs.realpathSync(probe)
+      } catch {
+        throw new BuckieError(BuckieErrorCode.PATH_TRAVERSAL, 'Path traversal detected', 400)
+      }
+      if (realProbe !== realRoot && !realProbe.startsWith(realRoot + path.sep)) {
+        throw new BuckieError(BuckieErrorCode.PATH_TRAVERSAL, 'Path traversal detected', 400)
+      }
     }
 
     return resolved
@@ -148,8 +177,14 @@ export class BucketService {
     return path.join(bucket.path, BUCKIE_INTERNAL_DIR, 'staging')
   }
 
-  /** @deprecated Thumbnails are now stored alongside originals in {WxH}/ subdirs. */
-  getThumbsDir(bucket: Bucket): string {
-    return path.join(bucket.path, BUCKIE_INTERNAL_DIR, 'thumbs')
+}
+
+/** True for existing paths and for dangling symlinks. */
+function pathExists(p: string): boolean {
+  try {
+    fs.lstatSync(p)
+    return true
+  } catch {
+    return false
   }
 }

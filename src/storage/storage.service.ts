@@ -7,6 +7,16 @@ import type { StorageProvider, DownloadResult, UploadOptions, FileInfoResult } f
 import { LocalStorageProvider } from './local.provider.js'
 import type { BucketService } from './bucket.service.js'
 
+const ACTIVE_CONTENT_MIME_TYPES = new Set([
+  'text/html',
+  'application/xhtml+xml',
+  'image/svg+xml',
+  'text/javascript',
+  'application/javascript',
+  'application/xml',
+  'text/xml',
+])
+
 export type { DownloadResult, UploadOptions, FileInfoResult }
 
 /**
@@ -154,6 +164,14 @@ export class StorageService {
       // fallback
     }
     return 'application/octet-stream'
+  }
+
+  /**
+   * Content a browser could execute if served inline from the API origin.
+   * Such files are always sent as attachments.
+   */
+  isActiveContent(mimeType: string): boolean {
+    return ACTIVE_CONTENT_MIME_TYPES.has(mimeType.split(';')[0]!.trim().toLowerCase())
   }
 
   /**

@@ -6,7 +6,7 @@ import { stat } from 'node:fs/promises'
 import { randomBytes } from 'node:crypto'
 import os from 'node:os'
 import { createRuntime, startServer } from '../runtime/index.js'
-import { getDataDir } from '../config/config.service.js'
+import { getDataDir, VERSION } from '../config/config.service.js'
 import { bashCompletion, zshCompletion, fishCompletion } from './completion.js'
 import type { Permission, Bucket, Identity } from '../types/index.js'
 
@@ -15,7 +15,7 @@ const program = new Command()
 program
   .name('buckie')
   .description('Buckie — filesystem-native file server with a minimal S3-style REST API')
-  .version('1.0.0')
+  .version(VERSION)
 
 // ──────────────────────────────────────────────────────────
 // buckie serve
@@ -23,7 +23,7 @@ program
 program
   .command('serve')
   .description('Start the Buckie server')
-  .option('--host <host>', 'Host to listen on', process.env.BUCKIE_HOST ?? '0.0.0.0')
+  .option('--host <host>', 'Host to listen on (loopback by default; use 0.0.0.0 to expose the server)', process.env.BUCKIE_HOST ?? '127.0.0.1')
   .option('--port <port>', 'Port to listen on', process.env.BUCKIE_PORT ?? '8080')
   .option('--data-dir <dir>', 'Data directory', getDataDir())
   .option('--log-level <level>', 'Log level (trace|debug|info|warn|error)', 'info')
@@ -98,10 +98,24 @@ create
   })
 
 create
-  .command('identity <identity> <secret>')
-  .description('Create a new identity with the given secret')
+  .command('identity <identity> [secret]')
+  .description('Create a new identity. The secret is read from the argument, BUCKIE_IDENTITY_SECRET or STDIN')
   .option('--data-dir <dir>', 'Data directory', getDataDir())
-  .action(async (identity: string, secret: string, opts) => {
+  .action(async (identity: string, secretArg: string | undefined, opts) => {
+    let secret = secretArg
+    if (secret !== undefined) {
+      console.error("[Buckie] Warning: a secret passed as an argument is visible in `ps` and shell history. Prefer BUCKIE_IDENTITY_SECRET, STDIN, or 'buckie provision'.")
+    } else if (process.env.BUCKIE_IDENTITY_SECRET) {
+      secret = process.env.BUCKIE_IDENTITY_SECRET
+    } else if (!process.stdin.isTTY) {
+      secret = (await readStdin()).split(/\r?\n/)[0]
+    }
+
+    if (!secret) {
+      console.error(JSON.stringify({ ok: false, error: { code: 'BUCKIE_INVALID_ARGS', message: 'A secret is required: pass it as an argument, set BUCKIE_IDENTITY_SECRET, or pipe it on STDIN' } }))
+      process.exit(1)
+    }
+
     const runtime = await createRuntime({ dataDir: opts.dataDir })
     try {
       const id = await runtime.identityService.create(identity, secret)
@@ -469,3 +483,10 @@ function printError(err: unknown): void {
 
 program.parse(process.argv)
 
+
+async function readStdin(): Promise<string> {
+  let data = ''
+  process.stdin.setEncoding('utf-8')
+  for await (const chunk of process.stdin) data += chunk
+  return data
+}

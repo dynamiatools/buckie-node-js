@@ -6,7 +6,7 @@ import { pipeline } from 'node:stream/promises'
 import type { Readable } from 'node:stream'
 import { fileTypeFromFile } from 'file-type'
 import type { Bucket, ListResult, ListEntry, ListFilter } from '../types/index.js'
-import { BuckieError, BuckieErrorCode, notFound } from '../errors/index.js'
+import { BuckieError, BuckieErrorCode, notFound, conflict } from '../errors/index.js'
 import type { StorageProvider, DownloadResult, UploadOptions, FileInfoResult } from './storage.provider.js'
 import type { BucketService } from './bucket.service.js'
 
@@ -15,7 +15,7 @@ import type { BucketService } from './bucket.service.js'
  *
  * This is the default backend. Files are stored under the bucket's `path`
  * directory, uploads are staged atomically, and internal state lives inside a
- * reserved `.sfs` sub-directory.
+ * reserved `.buckie` sub-directory.
  */
 export class LocalStorageProvider implements StorageProvider {
   constructor(private readonly bucketService: BucketService) {}
@@ -93,6 +93,16 @@ export class LocalStorageProvider implements StorageProvider {
     options: UploadOptions = {},
   ): Promise<{ size: number; etag: string }> {
     const finalPath = this.bucketService.resolveKey(bucket, key)
+
+    const existing = await fsp.stat(finalPath).catch(() => null)
+    if (existing?.isDirectory()) {
+      throw new BuckieError(BuckieErrorCode.OBJECT_IS_DIRECTORY, `'${key}' is a directory`, 400)
+    }
+    if (existing && options.overwrite === false) {
+      throw conflict(`Object '${key}' already exists`, BuckieErrorCode.UPLOAD_FAILED)
+    }
+
+    await this.bucketService.ensureBucketInternals(bucket.path)
     const stagingDir = this.bucketService.getStagingDir(bucket)
     const stagingFile = path.join(stagingDir, `${crypto.randomUUID()}.tmp`)
 
@@ -134,8 +144,9 @@ export class LocalStorageProvider implements StorageProvider {
         }
       }
 
-      const etag = `"${bytesWritten}-${Date.now()}"`
-      return { size: bytesWritten, etag }
+      // Same ETag formula as download()/stat(), so uploads and reads agree
+      const committed = await fsp.stat(finalPath)
+      return { size: bytesWritten, etag: `"${committed.size}-${committed.mtimeMs}"` }
     } catch (err) {
       // Cleanup staging file on error
       await fsp.unlink(stagingFile).catch(() => {})
@@ -178,7 +189,7 @@ export class LocalStorageProvider implements StorageProvider {
     const result: ListEntry[] = []
 
     for (const entry of entries) {
-      if (entry.name === '.buckie') continue
+      if (entry.name.toLowerCase() === '.buckie') continue
 
       const isDir = entry.isDirectory()
       if (filter === 'files' && isDir) continue
@@ -221,7 +232,7 @@ export class LocalStorageProvider implements StorageProvider {
 
     const allEntries: ListEntry[] = []
     for (const entry of dirEntries) {
-      if (entry.name === '.buckie') continue
+      if (entry.name.toLowerCase() === '.buckie') continue
 
       const isDir = entry.isDirectory()
       if (filter === 'files' && isDir) continue
